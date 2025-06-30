@@ -1,7 +1,7 @@
 # XL_pipeline
 Find the XL pairs using IP2
 # Cross-linking MS2-MS3 Workflows in IP2
-A concise, copy-and-paste guide for **DSBU** and **DSSO** datasets, followed by an
+A concise, copy-and-paste guide for **DSBU** datasets, followed by an
 explanation of the `dsbu_link_fdr_allin1.py` post-processing script and all QC /
 FDR columns it adds.
 
