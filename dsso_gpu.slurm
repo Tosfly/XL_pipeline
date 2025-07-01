@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=dsso_xl_gpu
 #SBATCH --account=b1028              # allocation
-#SBATCH --partition=gpu              # or gpu-a100
+#SBATCH --partition=b1028              # or gpu-a100
 #SBATCH --gres=gpu:1                 # 1 V100 or A100
 #SBATCH --time=01:00:00              # plenty for one lane
 #SBATCH --cpus-per-gpu=16            # feeds I/O & pandas fallback
@@ -20,7 +20,7 @@ source activate rapids-24.06
 
 # -------- paths ----------------------------------------------------------
 PEP_LIST="pep_list.csv"
-SPECTRA_DIR="/home/ywd617/XL_anal"         # adjust if needed
+SPECTRA_DIR="/home/ywd617/XL_anal_GPU"         # adjust if needed
 OUTPUT_CSV="DSSO_links_FDR_${SLURM_JOB_ID}.csv"
 SCRIPT="dsso_link_fdr_gpu.py"              # GPU-aware script
 
