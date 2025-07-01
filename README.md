@@ -49,3 +49,14 @@ python dsbu_link_fdr_allin1.py  pep_list.csv  /path/to/spectra  DSBU_links_FDR.c
 | **cum\_decoys**            | Running sum of `decoy_link == True` from the top of the table down to the current row.                                                                                                                                                                                                                                                                                                                                              | Tracks how many false (decoy) links are accumulating as you lower the score threshold.                                                                                                                                                    |            |                                                                                         |
 | **FDR**                    | Target–decoy estimate, **unit-less probability**:<br>$FDR = 2 × (cum_decoys / cum_links)$<br>The factor 2 projects the observed decoy frequency onto the target population because the database contains a 1:1 mix of target and decoy sequences.                                                                                                                                                                                   | At any row it answers: “If I keep every link **at this score or higher**, what fraction do I expect to be wrong?” 0.01 = 1 %. Values can exceed 1 when decoys outnumber targets far down the list; those rows are never kept in practice. |            |                                                                                         |
 
+Using GPU:
+
+# first time only (CUDA 12 + Python 3.10 example)
+conda create -n rapids -c rapidsai -c conda-forge \
+      cudf=24.06 cupy numba-cuda python=3.10
+conda activate rapids
+
+pip install pandas
+
+python dsso_link_fdr_gpu.py  pep_list.csv  /spectra  DSSO_links_FDR.csv \
+       --threads 16          # threads only used in CPU fallback
