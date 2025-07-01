@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=dsso_xl_analysis
 #SBATCH --account=b1028              # Replace with your allocation
-#SBATCH --partition=short             # short (4hr), normal (48hr), long (7d)
+#SBATCH --partition=b1028             # short (4hr), normal (48hr), long (7d)
 #SBATCH --time=00:30:00              # 30 minutes should be sufficient
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
