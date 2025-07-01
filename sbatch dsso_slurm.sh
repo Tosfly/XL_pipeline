@@ -31,9 +31,9 @@ cd $SLURM_SUBMIT_DIR
 
 # Define input/output paths
 PEP_LIST="pep_list.csv"
-SPECTRA_DIR="/path/to/spectra"  # Update this path
+SPECTRA_DIR="/home/ywd617/XL_anal"  # Update this path
 OUTPUT_CSV="DSSO_links_FDR_${SLURM_JOB_ID}.csv"
-SCRIPT="dsso_link_fdr_allin1_mt_fixed.py"  # Or use the optimized version
+SCRIPT="DSSO_MT_XL.py"  # Or use the optimized version
 
 # Log job information
 echo "Job started on $(hostname) at $(date)"
