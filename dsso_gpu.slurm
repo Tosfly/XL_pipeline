@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dsso_xl_gpu
+#SBATCH --job-name=b1028
 #SBATCH --account=b1028                 # allocation
 #SBATCH --partition=b1028                 # or gpu-a100 if available
 #SBATCH --gres=gpu:1                    # 1 GPU (V100 or A100)
@@ -12,7 +12,7 @@
 #SBATCH --mail-user=yi-zhi.wang@northwestern.edu
 
 module purge
-module load miniconda3
+module load python-miniconda3/4.12.0
 module load cuda/12.2
 
 # activate RAPIDS env
@@ -20,7 +20,7 @@ source activate rapids-24.06
 
 # paths (edit as needed)
 PEP_LIST="pep_list.csv"
-SPECTRA_DIR="/home/ywd617/XL_anal"
+SPECTRA_DIR="/home/ywd617/XL_anal_GPU"
 OUTPUT_CSV="DSSO_links_FDR_${SLURM_JOB_ID}.csv"
 SCRIPT="dsso_link_fdr_gpu.py"        # the GPU-aware script
 
