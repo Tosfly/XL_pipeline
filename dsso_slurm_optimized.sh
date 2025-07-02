@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=dsso_xl_analysis
+#SBATCH --job-name=S4_BP
 #SBATCH --account=b1028
 #SBATCH --partition=b1028
-#SBATCH --time=01:00:00              # Reduced based on actual runtime
+#SBATCH --time=02:30:00              # Reduced based on actual runtime
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8            # 8 cores is usually optimal for this workload
 #SBATCH --mem=4G                     # Reduced based on actual usage
-#SBATCH --tmp=20G                    # Request local scratch space
 #SBATCH --output=dsso_%j.out
 #SBATCH --error=dsso_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -32,24 +31,16 @@ cd $SLURM_SUBMIT_DIR
 
 # Define paths
 PEP_LIST="pep_list.csv"
-SPECTRA_DIR="/home/ywd617/XL_anal_S3_MI"
-OUTPUT_CSV="S3_MI_DSSO_links_FDR_${SLURM_JOB_ID}.csv"
+SPECTRA_DIR="/home/ywd617/XL_anal_S4_BP"
+OUTPUT_CSV="S4_BP_DSSO_links_FDR_${SLURM_JOB_ID}.csv"
 SCRIPT="DSSO_MT_XL_optimized.py"  # Use the optimized version
 
 # Log job information
 echo "Job started on $(hostname) at $(date)"
 echo "Using ${SLURM_CPUS_PER_TASK} CPUs"
 echo "Working directory: $(pwd)"
-echo "Temporary directory: $TMPDIR"
 
-# Option 1: Use local scratch for better I/O performance
-# Uncomment these lines if I/O is still a bottleneck
-# echo "Copying spectra files to local scratch..."
-# cp -r ${SPECTRA_DIR} $TMPDIR/
-# SPECTRA_LOCAL=$TMPDIR/$(basename ${SPECTRA_DIR})
-# echo "Files copied to $SPECTRA_LOCAL"
-
-# Option 2: Work directly from network storage (default)
+# Work directly from network storage
 SPECTRA_LOCAL=${SPECTRA_DIR}
 
 # Run timing analysis
@@ -60,11 +51,6 @@ time python ${SCRIPT} ${PEP_LIST} ${SPECTRA_LOCAL} ${OUTPUT_CSV} --threads ${SLU
 if [ $? -eq 0 ]; then
     echo "Analysis completed successfully at $(date)"
     echo "Output saved to: ${OUTPUT_CSV}"
-    
-    # If using local scratch, copy results back
-    # if [ "$SPECTRA_LOCAL" != "$SPECTRA_DIR" ]; then
-    #     cp ${OUTPUT_CSV} $SLURM_SUBMIT_DIR/
-    # fi
 else
     echo "Analysis failed with exit code $? at $(date)"
 fi
