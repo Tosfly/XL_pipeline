@@ -34,7 +34,10 @@ sample1.ms3   →   sample1_ms3.ms2
 
 5. Post-processing with dsbu_link_fdr_allin1.py
 Save the *.ms2, *_ms3.ms2 and pep_list.csv file to the same folder and run the commend line:
+
 python dsbu_link_fdr_allin1.py  pep_list.csv  /path/to/spectra  DSBU_links_FDR.csv
+
+Now it takes ~2 hours using 24 CPUs to finish the analysis. All tempt using GPU failed :-( too much memory used...
 
 6. Output file details
 | Column                     | How it is computed                                                                                                                                                                                                                                                                                                                                                                                                                  | Why it matters                                                                                                                                                                                                                            |            |                                                                                         |
