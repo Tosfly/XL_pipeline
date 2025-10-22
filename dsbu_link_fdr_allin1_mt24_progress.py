@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-dsbu_link_fdr_allin1_mt24_progress.py – DSBU MS2–MS3 cross‑link builder
-------------------------------------------------------------------------
-* Multi-file, WSL2‑robust, **24‑thread** parallelization
-* Case‑insensitive file resolution for *.ms2 / *_ms3.ms2
-* Strict +85 / +111 complementarity, MS² reporter doublet QC (Δ=26.016 Da / z)
+dsbu_link_fdr_allin1_mt24_progress_corrected.py – DSBU MS2–MS3 cross‐link builder
+-----------------------------------------------------------------------------------
+* Multi-file, WSL2‐robust, **24‐thread** parallelization
+* Case‐insensitive file resolution for *.ms2 / *_ms3.ms2
+* Strict +85 / +111 complementarity, MS² reporter doublet QC
 * Drops ambiguous results ('Mono', 'Rare')
 * Precursor mass filter: total peptide mass + DSBU within ±10 ppm of MS2 precursor
-* User‑tunable: --ppm, --min_ratio, --threads
-* **Fixed parallelism**: Now actually uses threads for main processing loop
-* **Added progress bars**: Live progress tracking with tqdm
+* User‐tunable: --ppm, --min_ratio, --threads
+* Fixed parallelism with progress bars (tqdm)
+
+CORRECTIONS APPLIED (2025):
+---------------------------
+1. REPORTER_DELTA corrected to 25.97929 Da (matches 111.03205 - 85.05276)
+2. Precursor mass formula updated: subtract 2 * PROTON (loss of 2 NHS groups)
+3. Improved peptide pairing: considers all DSBU-containing peptides, not just top 2
+4. Added option for tighter mass tolerance (5 ppm for well-calibrated instruments)
+5. Enhanced doublet detection with same-charge requirement documentation
+6. Added recommendations for cross-validation with dedicated XL-MS engines
 """
 
 import os
@@ -22,37 +30,46 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Optional
+from itertools import combinations
 
 import pandas as pd
 from tqdm import tqdm
 
-# ── Configuration and Constants ────────────────────────────────────────────
+# ── Configuration and Constants ──────────────────────────────────────────────────
 @dataclass
 class DSBUConstants:
-    """DSBU cross-linker chemical constants"""
-    ALPHA_STUB: float = 85.05276
-    BETA_STUB: float = 111.03205
-    REPORTER_DELTA: float = 26.01929  # Da difference in reporter ions
-    INTACT_MASS: float = 138.06808
-    PROTON: float = 1.007276
-    WATER: float = 18.01528
+    """DSBU cross-linker chemical constants (corrected 2025)"""
+    ALPHA_STUB: float = 85.05276      # Alpha stub mass
+    BETA_STUB: float = 111.03205      # Beta stub mass
+    # CORRECTED: Reporter delta now matches beta - alpha difference
+    REPORTER_DELTA: float = 25.97929  # Corrected from 26.01929 (literature: ~26 u spacing)
+    INTACT_MASS: float = 138.06808    # Intact DSBU mass
+    PROTON: float = 1.007276           # Proton mass
+    WATER: float = 18.01528            # Water mass
+    
+    # Validation check
+    def __post_init__(self):
+        expected_delta = self.BETA_STUB - self.ALPHA_STUB
+        if abs(self.REPORTER_DELTA - expected_delta) > 0.001:
+            logging.warning(f"REPORTER_DELTA ({self.REPORTER_DELTA}) doesn't match "
+                          f"beta-alpha difference ({expected_delta})")
 
 DSBU = DSBUConstants()
 
-# ── Patterns ────────────────────────────────────────────────────────────────
+# ── Patterns ──────────────────────────────────────────────────────────────────────
 DECOY_RE = re.compile(r'(?:decoy|reverse|rev_)', re.I)
 GN_RE = re.compile(r'GN=([A-Za-z0-9_.-]+)')
 STUB85_RE = re.compile(r'\(85\.052')
 STUB111_RE = re.compile(r'\(111\.032')
 
-# ── Setup logging ───────────────────────────────────────────────────────────
+# ── Setup logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ── MS2 File Handling ───────────────────────────────────────────────────────
+# ── MS2 File Handling ─────────────────────────────────────────────────────────────
 class MS2Cache:
     """Efficient MS2 file caching with memory management"""
     
@@ -143,7 +160,15 @@ def has_doublet_optimized(peaks: List[Tuple[float, float]], z: int,
                           ppm: float = 10.0, min_ratio: float = 0.10) -> Tuple[bool, float]:
     """
     Optimized DSBU reporter doublet detection using binary search.
-    Checks for 26.016 Da / z mass difference.
+    
+    Checks for CORRECTED 25.979 Da / z mass difference.
+    
+    Note: In MS2 spectra, the doublet peaks share the same charge state (z) 
+    as they originate from the same precursor. The mass difference between 
+    the two reporter ions is REPORTER_DELTA/z in the m/z domain.
+    
+    For DSBU, instruments trigger MS3 on doublets only when both ions share z.
+    Reference: PMC literature on DSBU MS2→MS3 methods
     """
     if not peaks or not z:
         return False, 0.0
@@ -160,6 +185,7 @@ def has_doublet_optimized(peaks: List[Tuple[float, float]], z: int,
     if max_intensity == 0:
         return False, 0.0
     
+    # CORRECTED: Using the proper reporter delta value
     delta_mz = DSBU.REPORTER_DELTA / z
     
     for i, (mz1, inten1) in enumerate(peaks_sorted[:-1]):
@@ -208,96 +234,127 @@ def validate_inputs(pep_df: pd.DataFrame, spectra_dir: str) -> None:
     
     logger.info(f"Found {len(ms2_files)} MS2 files in {spectra_dir}")
 
-def process_group_parallel(item: Tuple, seq_info: Dict, pep_df: pd.DataFrame,
-                          ppm: float, min_ratio: float) -> Optional[Dict]:
-    """Process a single parent scan group - designed for parallel execution"""
+def process_group_improved(item: Tuple, seq_info: Dict, pep_df: pd.DataFrame,
+                          ppm: float, min_ratio: float, 
+                          max_candidates: int = 10) -> List[Dict]:
+    """
+    Process a single parent scan group - IMPROVED version
+    
+    Now considers all peptide candidates with DSBU stubs, not just top 2.
+    Filters by mass and stub complementarity, then scores by summed XCorr.
+    """
     (parent_path, parent_scan), group = item
+    results = []
     
     try:
-        # Top 2 unique sequences by XCorr
-        group_sorted = group.sort_values('XCorr', ascending=False)
-        group_unique = group_sorted.drop_duplicates(subset='sequence', keep='first')
-        
-        if len(group_unique) < 2:
-            return None
-        
-        pep_a = group_unique.iloc[0]
-        pep_b = group_unique.iloc[1]
-        
-        # Check stub complementarity
-        stub_a = stub_type(pep_a['sequence'])
-        stub_b = stub_type(pep_b['sequence'])
-        
-        if not (stub_a in ('85', '111') and stub_b in ('85', '111') and stub_a != stub_b):
-            return None
-        
         # Read parent MS2 spectrum and check doublet
         charge, peaks = ms2_cache.read_ms2_spectrum(parent_path, int(parent_scan))
         doublet_present, doublet_ratio = has_doublet_optimized(peaks, charge, ppm, min_ratio)
         
-        # Precursor mass validation
-        mass_a = float(pep_a['Calc M+H+'])
-        mass_b = float(pep_b['Calc M+H+'])
-        calc_total = mass_a + mass_b + DSBU.INTACT_MASS - DSBU.PROTON
-        
-        # Find parent scan in original data
+        # Find parent scan in original data for mass
         parent_name = os.path.splitext(os.path.basename(parent_path))[0]
         parent_rows = pep_df[(pep_df['File Name'] == parent_name) & 
                             (pep_df['Scan Num'] == int(parent_scan))]
         
         if parent_rows.empty:
-            return None
+            return results
         
         parent_mass = float(parent_rows.iloc[0]['Calc M+H+'])
-        mass_error_ppm = abs(calc_total - parent_mass) / parent_mass * 1e6
         
-        if mass_error_ppm > 10:
-            return None
+        # Get all unique peptides with DSBU stubs
+        group_sorted = group.sort_values('XCorr', ascending=False)
+        group_unique = group_sorted.drop_duplicates(subset='sequence', keep='first')
         
-        # Helper to get sequence info
-        def get_info(seq: str, key: str):
-            return seq_info.get(seq, {}).get(key)
+        # Separate by stub type
+        stub85_peptides = []
+        stub111_peptides = []
         
-        # Clean protein names
-        def clean_proteins(proteins: str) -> str:
-            return proteins.strip('[] ')
+        for _, pep in group_unique.iterrows():
+            stub = stub_type(pep['sequence'])
+            if stub == '85':
+                stub85_peptides.append(pep)
+            elif stub == '111':
+                stub111_peptides.append(pep)
         
-        return {
-            'MS2_file': os.path.basename(parent_path),
-            'MS2_scan': int(parent_scan),
-            'parent_charge': charge,
-            'MS3_file_A': f"{pep_a['File Name']}.ms2",
-            'MS3_scan_A': int(pep_a['Scan Num']),
-            'sequence_A': pep_a['sequence'],
-            'XCorr_A': pep_a['XCorr'],
-            'DeltaCn_A': get_info(pep_a['sequence'], 'deltcn'),
-            'RT_A': get_info(pep_a['sequence'], 'rt'),
-            'Conf_A': get_info(pep_a['sequence'], 'conf'),
-            'Proteins_A': clean_proteins(pep_a['Proteins']),
-            'Gene_A': get_info(pep_a['sequence'], 'gene'),
-            'MS3_file_B': f"{pep_b['File Name']}.ms2",
-            'MS3_scan_B': int(pep_b['Scan Num']),
-            'sequence_B': pep_b['sequence'],
-            'XCorr_B': pep_b['XCorr'],
-            'DeltaCn_B': get_info(pep_b['sequence'], 'deltcn'),
-            'RT_B': get_info(pep_b['sequence'], 'rt'),
-            'Conf_B': get_info(pep_b['sequence'], 'conf'),
-            'Proteins_B': clean_proteins(pep_b['Proteins']),
-            'Gene_B': get_info(pep_b['sequence'], 'gene'),
-            'doublet_present': doublet_present,
-            'doublet_int_ratio': doublet_ratio,
-            'mass_error_ppm': round(mass_error_ppm, 2),
-            'Note': 'true XL',
-        }
+        # Limit candidates to avoid combinatorial explosion
+        stub85_peptides = stub85_peptides[:max_candidates]
+        stub111_peptides = stub111_peptides[:max_candidates]
+        
+        # Try all combinations of 85-111 pairs
+        for pep_a in stub85_peptides:
+            for pep_b in stub111_peptides:
+                # Calculate masses with CORRECTED formula
+                mass_a = float(pep_a['Calc M+H+'])
+                mass_b = float(pep_b['Calc M+H+'])
+                # CORRECTED: Now subtracting 2 * PROTON (loss of 2 NHS groups)
+                calc_total = mass_a + mass_b + DSBU.INTACT_MASS - 2 * DSBU.PROTON
+                
+                # Check mass error
+                mass_error_ppm = abs(calc_total - parent_mass) / parent_mass * 1e6
+                
+                if mass_error_ppm > ppm:  # Use the same ppm tolerance
+                    continue
+                
+                # Helper to get sequence info
+                def get_info(seq: str, key: str):
+                    return seq_info.get(seq, {}).get(key)
+                
+                # Clean protein names
+                def clean_proteins(proteins: str) -> str:
+                    return proteins.strip('[] ')
+                
+                result = {
+                    'MS2_file': os.path.basename(parent_path),
+                    'MS2_scan': int(parent_scan),
+                    'parent_charge': charge,
+                    'MS3_file_A': f"{pep_a['File Name']}.ms2",
+                    'MS3_scan_A': int(pep_a['Scan Num']),
+                    'sequence_A': pep_a['sequence'],
+                    'XCorr_A': pep_a['XCorr'],
+                    'DeltaCn_A': get_info(pep_a['sequence'], 'deltcn'),
+                    'RT_A': get_info(pep_a['sequence'], 'rt'),
+                    'Conf_A': get_info(pep_a['sequence'], 'conf'),
+                    'Proteins_A': clean_proteins(pep_a['Proteins']),
+                    'Gene_A': get_info(pep_a['sequence'], 'gene'),
+                    'MS3_file_B': f"{pep_b['File Name']}.ms2",
+                    'MS3_scan_B': int(pep_b['Scan Num']),
+                    'sequence_B': pep_b['sequence'],
+                    'XCorr_B': pep_b['XCorr'],
+                    'DeltaCn_B': get_info(pep_b['sequence'], 'deltcn'),
+                    'RT_B': get_info(pep_b['sequence'], 'rt'),
+                    'Conf_B': get_info(pep_b['sequence'], 'conf'),
+                    'Proteins_B': clean_proteins(pep_b['Proteins']),
+                    'Gene_B': get_info(pep_b['sequence'], 'gene'),
+                    'doublet_present': doublet_present,
+                    'doublet_int_ratio': doublet_ratio,
+                    'mass_error_ppm': round(mass_error_ppm, 2),
+                    'link_score': pep_a['XCorr'] + pep_b['XCorr'],
+                    'Note': 'true XL',
+                }
+                results.append(result)
+        
     except Exception as e:
         logger.warning(f"Error processing {parent_path} scan {parent_scan}: {e}")
-        return None
+    
+    return results
 
 def build_links(pep_list: str, spectra_dir: str, threads: int = 24,
-                ppm: float = 10.0, min_ratio: float = 0.10) -> pd.DataFrame:
-    """Main function to build cross-links with full parallelization"""
+                ppm: float = 10.0, min_ratio: float = 0.10,
+                max_candidates: int = 10) -> pd.DataFrame:
+    """
+    Main function to build cross-links with full parallelization
+    
+    IMPROVEMENTS:
+    - Corrected REPORTER_DELTA (25.979 Da)
+    - Corrected precursor mass calculation (- 2 * PROTON)
+    - Improved peptide pairing (considers all candidates with stubs)
+    - Configurable mass tolerance (consider 5 ppm for well-calibrated instruments)
+    """
     
     logger.info(f"Loading peptide list from {pep_list}")
+    logger.info(f"Using DSBU reporter delta: {DSBU.REPORTER_DELTA:.5f} Da")
+    logger.info(f"Mass tolerance: ±{ppm} ppm, Min intensity ratio: {min_ratio}")
+    
     pep_df = pd.read_csv(pep_list)
     
     # Validate inputs
@@ -369,26 +426,27 @@ def build_links(pep_list: str, spectra_dir: str, threads: int = 24,
     # Group by parent scan
     grouped_data = list(ms3_df.groupby(['parent_path', 'parent_scan'], sort=False))
     logger.info(f"Processing {len(grouped_data)} parent scans...")
+    logger.info(f"Considering up to {max_candidates} candidates per stub type")
     
-    # PARALLEL PROCESSING OF MAIN LOOP - THIS IS THE KEY FIX!
+    # PARALLEL PROCESSING with improved pairing
     rows = []
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [
-            executor.submit(process_group_parallel, item, seq_info, pep_df, ppm, min_ratio)
+            executor.submit(process_group_improved, item, seq_info, pep_df, 
+                          ppm, min_ratio, max_candidates)
             for item in grouped_data
         ]
         
         # Process with progress bar
         for future in tqdm(as_completed(futures), total=len(futures),
                           desc="Building cross-links"):
-            result = future.result()
-            if result:
-                rows.append(result)
+            results = future.result()
+            rows.extend(results)  # Note: now extending, not appending
     
     if not rows:
         sys.exit('ERROR: No valid cross-links found')
     
-    logger.info(f"Found {len(rows)} valid cross-links")
+    logger.info(f"Found {len(rows)} valid cross-link candidates")
     
     # Create DataFrame and calculate FDR
     links_df = pd.DataFrame(rows)
@@ -400,11 +458,20 @@ def build_links(pep_list: str, spectra_dir: str, threads: int = 24,
         lambda s: seq_info.get(s, {}).get('is_decoy', False))
     links_df['decoy_link'] = links_df['decoy_A'] | links_df['decoy_B']
     
-    # Calculate link score
-    links_df['link_score'] = links_df['XCorr_A'] + links_df['XCorr_B']
-    
     # Sort by score and calculate FDR
     links_df = links_df.sort_values('link_score', ascending=False).reset_index(drop=True)
+    
+    # Remove duplicate cross-links (keep highest scoring)
+    # Consider a link duplicate if it has the same peptides and parent scan
+    links_df['link_key'] = links_df.apply(
+        lambda x: tuple(sorted([x['sequence_A'], x['sequence_B']]) + [x['MS2_scan']]), 
+        axis=1
+    )
+    links_df = links_df.drop_duplicates(subset='link_key', keep='first')
+    links_df = links_df.drop('link_key', axis=1)
+    
+    # Recalculate ranks after deduplication
+    links_df = links_df.reset_index(drop=True)
     links_df['rank'] = links_df.index + 1
     links_df['cum_links'] = links_df['rank']
     links_df['cum_decoys'] = links_df['decoy_link'].cumsum()
@@ -420,8 +487,24 @@ def build_links(pep_list: str, spectra_dir: str, threads: int = 24,
 def main():
     """Main entry point with argument parsing"""
     parser = argparse.ArgumentParser(
-        description='DSBU cross-link builder with full parallelization and progress tracking',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description='DSBU cross-link builder (CORRECTED 2025) with proper reporter mass and precursor calculation',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+CORRECTIONS APPLIED:
+- Reporter delta: 25.97929 Da (matches beta-alpha stub difference)
+- Precursor mass: Now subtracts 2 * PROTON (loss of 2 NHS groups)
+- Improved peptide pairing: considers all candidates with DSBU stubs
+- Recommended: Use 5 ppm for well-calibrated instruments
+
+CROSS-VALIDATION:
+Consider validating results with dedicated XL-MS engines:
+- MeroX (with Rise/RiseUP scoring)
+- XlinkX 2.5 (in Proteome Discoverer)
+- pLink2
+- XiSearch/xiFDR
+- Kojak + Percolator
+- Prosit-XL (2025)
+        """
     )
     
     parser.add_argument('pep_list', 
@@ -433,9 +516,11 @@ def main():
     parser.add_argument('--threads', type=int, default=24,
                        help='Number of worker threads')
     parser.add_argument('--ppm', type=float, default=10.0,
-                       help='Doublet mass tolerance in ppm')
-    parser.add_argument('--min_ratio', type=float, default=0.10,
-                       help='Minimum intensity ratio for doublet (0-1)')
+                       help='Mass tolerance in ppm (consider 5 for well-calibrated instruments)')
+    parser.add_argument('--min_ratio', type=float, default=0.15,
+                       help='Minimum intensity ratio for doublet (0-1, default raised to 0.15)')
+    parser.add_argument('--max_candidates', type=int, default=10,
+                       help='Maximum peptide candidates per stub type to consider')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose logging')
     
@@ -444,6 +529,10 @@ def main():
     if args.verbose:
         logger.setLevel(logging.DEBUG)
     
+    # Warn if using default ppm
+    if args.ppm == 10.0:
+        logger.info("Using default 10 ppm tolerance. Consider --ppm 5 for well-calibrated instruments")
+    
     try:
         # Run the main processing
         df = build_links(
@@ -451,12 +540,13 @@ def main():
             args.spectra_dir,
             args.threads,
             ppm=args.ppm,
-            min_ratio=args.min_ratio
+            min_ratio=args.min_ratio,
+            max_candidates=args.max_candidates
         )
         
         # Save results
         df.to_csv(args.out_csv, index=False)
-        logger.info(f'✓ Successfully wrote {len(df)} cross-links to {args.out_csv}')
+        logger.info(f'✔ Successfully wrote {len(df)} cross-links to {args.out_csv}')
         
         # Report FDR thresholds
         for fdr_limit in (0.01, 0.05):
@@ -470,6 +560,12 @@ def main():
                     f'({int(top_link["cum_links"])} links, '
                     f'{int(top_link["cum_decoys"])} decoys)'
                 )
+        
+        # Recommendations
+        logger.info("\nRECOMMENDATIONS:")
+        logger.info("1. Cross-validate with MeroX, XlinkX, pLink2, or xiFDR")
+        logger.info("2. Consider exporting to xiFDR or Percolator for advanced FDR control")
+        logger.info("3. Verify MS acquisition settings: Delta M1 = 25.979 Da, same charge requirement")
     
     except Exception as e:
         logger.error(f"Fatal error: {e}")
